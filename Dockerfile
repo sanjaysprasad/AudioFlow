@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy server code
 COPY server.py .
 
-# Render default port
+# Standard web ports (8000 for Koyeb/local, 10000 for Render)
+EXPOSE 8000
 EXPOSE 10000
-ENV PORT=10000
 
-CMD ["sh", "-c", "python3 -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000}"]
+# Dynamically bind to the platform port ($PORT) or fallback to 8000
+CMD ["sh", "-c", "python3 -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}"]
