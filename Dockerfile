@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Install python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -U -r requirements.txt
 
 # Copy server code
 COPY server.py .

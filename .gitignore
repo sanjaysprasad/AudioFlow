@@ -37,3 +37,8 @@ ENV/
 /tmp/
 *.part
 *.ytdl
+
+# Authentication & Cookies (keep private!)
+*cookie*.txt
+*.cookies
+

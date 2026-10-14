@@ -94,7 +94,7 @@ def cleanup_old_files():
 
 
 def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
-    """Background worker to download and process audio or video."""
+    """Background worker to download and process audio or video with multi-strategy fallback."""
     job_folder = TEMP_DIR / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
 
@@ -107,24 +107,21 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
 
     output_template = str(job_folder / "%(title)s.%(ext)s")
     ffmpeg_bin = find_ffmpeg()
-    ffmpeg_dir = os.path.dirname(ffmpeg_bin)
+    ffmpeg_dir = os.path.dirname(ffmpeg_bin) if ffmpeg_bin else ""
 
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--no-check-certificates",
-        "--geo-bypass",
-        "--extractor-args", "youtube:player_client=android,ios",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "--add-header", "Accept-Language: en-US,en;q=0.9",
-    ]
-
-    # Search for cookies file across standard paths (including Render Secret Files)
+    # Search for cookies file across standard paths (including Render Secret Files & env var)
     cookie_candidates = [
         Path("cookies.txt"),
+        Path("www.youtube.com_cookies.txt"),
         Path("/etc/secrets/cookies.txt"),
         Path("/app/cookies.txt"),
         Path("/tmp/cookies.txt")
     ]
+    # Also discover any *cookie*.txt in current working directory
+    for f in Path(".").glob("*cookie*.txt"):
+        if f not in cookie_candidates:
+            cookie_candidates.append(f)
+
     found_cookie = None
     for cand in cookie_candidates:
         if cand.exists() and cand.is_file() and cand.stat().st_size > 10:
@@ -135,40 +132,63 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
         try:
             cookie_path = Path("/tmp/cookies.txt")
             raw_cookie = os.environ["YTDLP_COOKIES"].replace("\\n", "\n").strip()
+            # Support base64 encoded cookies
+            if not raw_cookie.startswith("# Netscape") and "\t" not in raw_cookie:
+                try:
+                    import base64
+                    decoded = base64.b64decode(raw_cookie).decode("utf-8", errors="ignore")
+                    if "# Netscape" in decoded or "\t" in decoded:
+                        raw_cookie = decoded
+                except Exception:
+                    pass
             cookie_path.write_text(raw_cookie)
             found_cookie = cookie_path
         except Exception as e:
             print(f"Error writing cookies env var: {e}")
 
-    if found_cookie:
-        cmd.extend(["--cookies", str(found_cookie.resolve())])
+    # Determine platform
+    url_lower = url.lower()
+    is_youtube = ("youtube.com" in url_lower or "youtu.be" in url_lower)
+    is_instagram = ("instagram.com" in url_lower or "instagr.am" in url_lower)
 
+    # Multi-strategy client definitions for YouTube on datacenter IPs
+    if is_youtube and not found_cookie:
+        strategies = [
+            # Strategy 1: Mobile Web + Android + Web with native headers
+            ["--extractor-args", "youtube:player_client=mweb,android,web"],
+            # Strategy 2: TV Embedded + Web Embedded (often bypasses SABR botwall)
+            ["--extractor-args", "youtube:player_client=tv_embedded,web_embedded"],
+            # Strategy 3: Android Creator + Web
+            ["--extractor-args", "youtube:player_client=android_creator,web"],
+            # Strategy 4: Default fallback
+            []
+        ]
+    else:
+        strategies = [[]]
+
+    # Video / Audio format flags
     if is_video:
-        # Video MP4 handling with resolution (480p up to 4K 2160p) with robust multi-format fallback
         res = quality.strip().lower().replace("p", "")
         if res in ["480", "720", "1080", "1440", "2160"]:
             fmt_str = f"bv*[height<={res}]+ba/b[height<={res}]/bv*+ba/b"
         else:
             fmt_str = "bv*+ba/b"
-
-        cmd.extend([
+        format_args = [
             "-f", fmt_str,
             "--merge-output-format", "mp4",
             "--add-metadata",
             "--embed-thumbnail",
             "--no-playlist",
             "-o", output_template
-        ])
+        ]
     else:
-        # Audio handling (MP3, FLAC, WAV, AAC, OPUS, ALAC) with ba/b fallback
         if fmt in ["flac", "wav", "alac"]:
             q_arg = "0"
         elif quality in ["320", "256", "192", "128", "96", "160"]:
             q_arg = f"{quality}k"
         else:
             q_arg = "320k"
-
-        cmd.extend([
+        format_args = [
             "-f", "ba/b",
             "--extract-audio",
             "--audio-format", fmt,
@@ -177,78 +197,121 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
             "--embed-thumbnail",
             "--no-playlist",
             "-o", output_template
-        ])
+        ]
 
-    if os.path.exists(ffmpeg_dir):
-        cmd.extend(["--ffmpeg-location", ffmpeg_dir])
+    success = False
+    last_error_lines = []
 
-    cmd.append(url)
+    for strat_idx, strat_args in enumerate(strategies):
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--no-check-certificates",
+            "--geo-bypass",
+            "--socket-timeout", "30",
+        ]
 
-    error_lines = []
+        if found_cookie:
+            cmd.extend(["--cookies", str(found_cookie.resolve())])
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
+        if strat_args:
+            cmd.extend(strat_args)
 
-        for line in proc.stdout:
-            clean = line.strip()
-            if not clean:
-                continue
+        # Only pass browser user-agent for Instagram; never override YouTube's native client user-agents!
+        if is_instagram:
+            cmd.extend([
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "--add-header", "Accept-Language: en-US,en;q=0.9"
+            ])
 
-            if "ERROR:" in clean or "Sign in to confirm" in clean or "429" in clean or "blocked" in clean.lower():
-                error_lines.append(clean)
+        cmd.extend(format_args)
 
-            if "[download]" in clean and "%" in clean:
-                match = re.search(r'(\d+(?:\.\d+)?)%', clean)
-                if match:
-                    pct = float(match.group(1))
-                    mapped = 10 + int(pct * 0.75)
-                    jobs[job_id]["progress"] = mapped
-                    jobs[job_id]["message"] = f"Downloading: {clean}"
-            elif "[ExtractAudio]" in clean or "[ffmpeg]" in clean or "[Merger]" in clean:
-                jobs[job_id]["progress"] = 90
-                jobs[job_id]["message"] = f"Muxing and processing {fmt.upper()}..."
+        if ffmpeg_dir and os.path.exists(ffmpeg_dir):
+            cmd.extend(["--ffmpeg-location", ffmpeg_dir])
 
-        proc.wait()
+        cmd.append(url)
 
-        if proc.returncode == 0:
-            target_ext = "mp4" if is_video else fmt
-            produced_files = list(job_folder.glob(f"*.{target_ext}"))
-            if not produced_files:
-                produced_files = [f for f in job_folder.iterdir() if f.is_file() and not f.name.endswith(".part")]
+        error_lines = []
 
-            if produced_files:
-                output_file = produced_files[0]
-                jobs[job_id]["status"] = "completed"
-                jobs[job_id]["progress"] = 100
-                jobs[job_id]["message"] = "Ready to download!"
-                jobs[job_id]["file_path"] = str(output_file)
-                jobs[job_id]["file_name"] = output_file.name
-                jobs[job_id]["file_size"] = os.path.getsize(output_file)
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            for line in proc.stdout:
+                clean = line.strip()
+                if not clean:
+                    continue
+
+                if "ERROR:" in clean or "Sign in to confirm" in clean or "429" in clean or "blocked" in clean.lower():
+                    error_lines.append(clean)
+
+                if "[download]" in clean and "%" in clean:
+                    match = re.search(r'(\d+(?:\.\d+)?)%', clean)
+                    if match:
+                        pct = float(match.group(1))
+                        mapped = 10 + int(pct * 0.75)
+                        jobs[job_id]["progress"] = mapped
+                        jobs[job_id]["message"] = f"Downloading: {clean}"
+                elif "[ExtractAudio]" in clean or "[ffmpeg]" in clean or "[Merger]" in clean:
+                    jobs[job_id]["progress"] = 90
+                    jobs[job_id]["message"] = f"Muxing and processing {fmt.upper()}..."
+
+            proc.wait()
+
+            if proc.returncode == 0:
+                target_ext = "mp4" if is_video else fmt
+                produced_files = list(job_folder.glob(f"*.{target_ext}"))
+                if not produced_files:
+                    produced_files = [f for f in job_folder.iterdir() if f.is_file() and not f.name.endswith(".part")]
+
+                if produced_files:
+                    output_file = produced_files[0]
+                    jobs[job_id]["status"] = "completed"
+                    jobs[job_id]["progress"] = 100
+                    jobs[job_id]["message"] = "Ready to download!"
+                    jobs[job_id]["file_path"] = str(output_file)
+                    jobs[job_id]["file_name"] = output_file.name
+                    jobs[job_id]["file_size"] = os.path.getsize(output_file)
+                    success = True
+                    break
+
+            last_error_lines = error_lines
+            # Check if this strategy was blocked by bot check or format error, and retry if more strategies remain
+            norm_err = " ".join(error_lines).lower().replace("’", "'")
+            if strat_idx < len(strategies) - 1:
+                if any(k in norm_err for k in ["sign in to confirm", "bot", "requested format"]):
+                    jobs[job_id]["message"] = f"Switching client stream resolver (attempt {strat_idx + 2})..."
+                    time.sleep(0.5)
+                    continue
+
+        except Exception as e:
+            last_error_lines = [str(e)]
+
+    if not success:
+        jobs[job_id]["status"] = "error"
+        if last_error_lines:
+            clean_err = last_error_lines[-1].replace("ERROR: ", "").strip()
+            norm_err = clean_err.replace("’", "'").replace("“", '"').replace("”", '"').lower()
+
+            if "sign in to confirm" in norm_err or "confirm you're not a bot" in norm_err or "bot" in norm_err:
+                jobs[job_id]["message"] = (
+                    "YouTube blocked cloud datacenter IP (bot check). "
+                    "To fix this on Render, add cookies.txt to Secret Files or run via local tunnel."
+                )
+            elif "requested format is not available" in norm_err:
+                jobs[job_id]["message"] = "Requested stream resolution is not available for this video. Try another quality."
+            elif "video unavailable" in norm_err or "private video" in norm_err:
+                jobs[job_id]["message"] = "This video is private, age-restricted, or unavailable."
             else:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["message"] = "Processing completed, but output file was not found."
+                jobs[job_id]["message"] = f"yt-dlp: {clean_err[:130]}"
         else:
             jobs[job_id]["status"] = "error"
-            if error_lines:
-                clean_err = error_lines[-1].replace("ERROR: ", "").strip()
-                if "Sign in to confirm you're not a bot" in clean_err:
-                    jobs[job_id]["message"] = "YouTube flagged cloud IP (bot check). Try using Instagram or run via local tunnel."
-                else:
-                    jobs[job_id]["message"] = f"yt-dlp: {clean_err[:120]}"
-            else:
-                jobs[job_id]["status"] = "error"
-                jobs[job_id]["message"] = f"yt-dlp failed (code {proc.returncode}). Link may be private, age-restricted, or blocked."
-
-    except Exception as e:
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["message"] = f"Error: {str(e)}"
+            jobs[job_id]["message"] = "Conversion failed. Link may be blocked or unavailable."
 
 
 @app.post("/api/convert")
