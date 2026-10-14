@@ -616,27 +616,38 @@ class AudioExtractorApp(BaseApp):
             self.after(0, self.append_log, f"\n{'='*50}\n[{idx}/{total}] Processing: {url}\n{'='*50}")
             self.after(0, self.update_status, f"Processing {idx}/{total}: {url[:40]}...", (idx - 1) / total)
 
+            cmd = [
+                sys.executable, "-m", "yt_dlp",
+                "--no-check-certificates",
+                "--geo-bypass",
+                "--remote-components", "ejs:github",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "--add-header", "Accept-Language: en-US,en;q=0.9",
+            ]
+
+            cookies_file = Path("cookies.txt")
+            if cookies_file.exists():
+                cmd.extend(["--cookies", str(cookies_file.resolve())])
+
             if is_video:
                 if quality_choice in ["2160", "1440", "1080", "720", "480"]:
                     fmt_str = f"bestvideo[height<={quality_choice}]+bestaudio/best[height<={quality_choice}]/best"
                 else:
                     fmt_str = "bestvideo+bestaudio/best"
 
-                cmd = [
-                    sys.executable, "-m", "yt_dlp",
+                cmd.extend([
                     "-f", fmt_str,
                     "--merge-output-format", "mp4",
                     "-o", os.path.join(destination, "%(title)s.%(ext)s")
-                ]
+                ])
             else:
                 fmt_choice = fmt_raw
-                cmd = [
-                    sys.executable, "-m", "yt_dlp",
+                cmd.extend([
                     "--extract-audio",
                     "--audio-format", fmt_choice,
                     "--audio-quality", quality_choice,
                     "-o", os.path.join(destination, "%(title)s.%(ext)s")
-                ]
+                ])
 
             if embed_metadata:
                 cmd.append("--add-metadata")

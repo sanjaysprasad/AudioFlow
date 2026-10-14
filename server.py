@@ -109,6 +109,24 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
     ffmpeg_bin = find_ffmpeg()
     ffmpeg_dir = os.path.dirname(ffmpeg_bin)
 
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--no-check-certificates",
+        "--geo-bypass",
+        "--remote-components", "ejs:github",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "--add-header", "Accept-Language: en-US,en;q=0.9",
+    ]
+
+    # Optional cookies support via file or environment variable
+    cookies_file = Path("cookies.txt")
+    if cookies_file.exists():
+        cmd.extend(["--cookies", str(cookies_file.resolve())])
+    elif os.environ.get("YTDLP_COOKIES"):
+        cookie_path = Path("/tmp/cookies.txt")
+        cookie_path.write_text(os.environ["YTDLP_COOKIES"].strip())
+        cmd.extend(["--cookies", str(cookie_path)])
+
     if is_video:
         # Video MP4 handling with resolution (480p up to 4K 2160p)
         res = quality.strip().lower().replace("p", "")
@@ -117,15 +135,14 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
         else:
             fmt_str = "bestvideo+bestaudio/best"
 
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
+        cmd.extend([
             "-f", fmt_str,
             "--merge-output-format", "mp4",
             "--add-metadata",
             "--embed-thumbnail",
             "--no-playlist",
             "-o", output_template
-        ]
+        ])
     else:
         # Audio handling (MP3, FLAC, WAV, AAC, OPUS, ALAC)
         if fmt in ["flac", "wav", "alac"]:
@@ -135,8 +152,7 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
         else:
             q_arg = "320k"
 
-        cmd = [
-            sys.executable, "-m", "yt_dlp",
+        cmd.extend([
             "--extract-audio",
             "--audio-format", fmt,
             "--audio-quality", q_arg,
@@ -144,12 +160,14 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
             "--embed-thumbnail",
             "--no-playlist",
             "-o", output_template
-        ]
+        ])
 
     if os.path.exists(ffmpeg_dir):
         cmd.extend(["--ffmpeg-location", ffmpeg_dir])
 
     cmd.append(url)
+
+    error_lines = []
 
     try:
         proc = subprocess.Popen(
@@ -165,6 +183,9 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
             clean = line.strip()
             if not clean:
                 continue
+
+            if "ERROR:" in clean or "Sign in to confirm" in clean or "429" in clean or "blocked" in clean.lower():
+                error_lines.append(clean)
 
             if "[download]" in clean and "%" in clean:
                 match = re.search(r'(\d+(?:\.\d+)?)%', clean)
@@ -198,7 +219,15 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
                 jobs[job_id]["message"] = "Processing completed, but output file was not found."
         else:
             jobs[job_id]["status"] = "error"
-            jobs[job_id]["message"] = f"yt-dlp failed (exit code {proc.returncode}). The link may be private or restricted."
+            if error_lines:
+                clean_err = error_lines[-1].replace("ERROR: ", "").strip()
+                if "Sign in to confirm you're not a bot" in clean_err:
+                    jobs[job_id]["message"] = "YouTube flagged cloud IP (bot check). Try using Instagram or run via local tunnel."
+                else:
+                    jobs[job_id]["message"] = f"yt-dlp: {clean_err[:120]}"
+            else:
+                jobs[job_id]["status"] = "error"
+                jobs[job_id]["message"] = f"yt-dlp failed (code {proc.returncode}). Link may be private, age-restricted, or blocked."
 
     except Exception as e:
         jobs[job_id]["status"] = "error"
