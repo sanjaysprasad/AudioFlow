@@ -118,14 +118,30 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
         "--add-header", "Accept-Language: en-US,en;q=0.9",
     ]
 
-    # Optional cookies support via file or environment variable
-    cookies_file = Path("cookies.txt")
-    if cookies_file.exists():
-        cmd.extend(["--cookies", str(cookies_file.resolve())])
-    elif os.environ.get("YTDLP_COOKIES"):
-        cookie_path = Path("/tmp/cookies.txt")
-        cookie_path.write_text(os.environ["YTDLP_COOKIES"].strip())
-        cmd.extend(["--cookies", str(cookie_path)])
+    # Search for cookies file across standard paths (including Render Secret Files)
+    cookie_candidates = [
+        Path("cookies.txt"),
+        Path("/etc/secrets/cookies.txt"),
+        Path("/app/cookies.txt"),
+        Path("/tmp/cookies.txt")
+    ]
+    found_cookie = None
+    for cand in cookie_candidates:
+        if cand.exists() and cand.is_file() and cand.stat().st_size > 10:
+            found_cookie = cand
+            break
+
+    if not found_cookie and os.environ.get("YTDLP_COOKIES"):
+        try:
+            cookie_path = Path("/tmp/cookies.txt")
+            raw_cookie = os.environ["YTDLP_COOKIES"].replace("\\n", "\n").strip()
+            cookie_path.write_text(raw_cookie)
+            found_cookie = cookie_path
+        except Exception as e:
+            print(f"Error writing cookies env var: {e}")
+
+    if found_cookie:
+        cmd.extend(["--cookies", str(found_cookie.resolve())])
 
     if is_video:
         # Video MP4 handling with resolution (480p up to 4K 2160p)
