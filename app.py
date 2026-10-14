@@ -631,9 +631,9 @@ class AudioExtractorApp(BaseApp):
 
             if is_video:
                 if quality_choice in ["2160", "1440", "1080", "720", "480"]:
-                    fmt_str = f"bestvideo[height<={quality_choice}]+bestaudio/best[height<={quality_choice}]/best"
+                    fmt_str = f"bv*[height<={quality_choice}]+ba/b[height<={quality_choice}]/bv*+ba/b"
                 else:
-                    fmt_str = "bestvideo+bestaudio/best"
+                    fmt_str = "bv*+ba/b"
 
                 cmd.extend([
                     "-f", fmt_str,
@@ -643,6 +643,7 @@ class AudioExtractorApp(BaseApp):
             else:
                 fmt_choice = fmt_raw
                 cmd.extend([
+                    "-f", "ba/b",
                     "--extract-audio",
                     "--audio-format", fmt_choice,
                     "--audio-quality", quality_choice,

@@ -144,12 +144,12 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
         cmd.extend(["--cookies", str(found_cookie.resolve())])
 
     if is_video:
-        # Video MP4 handling with resolution (480p up to 4K 2160p)
+        # Video MP4 handling with resolution (480p up to 4K 2160p) with robust multi-format fallback
         res = quality.strip().lower().replace("p", "")
         if res in ["480", "720", "1080", "1440", "2160"]:
-            fmt_str = f"bestvideo[height<={res}]+bestaudio/best[height<={res}]/best"
+            fmt_str = f"bv*[height<={res}]+ba/b[height<={res}]/bv*+ba/b"
         else:
-            fmt_str = "bestvideo+bestaudio/best"
+            fmt_str = "bv*+ba/b"
 
         cmd.extend([
             "-f", fmt_str,
@@ -160,7 +160,7 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
             "-o", output_template
         ])
     else:
-        # Audio handling (MP3, FLAC, WAV, AAC, OPUS, ALAC)
+        # Audio handling (MP3, FLAC, WAV, AAC, OPUS, ALAC) with ba/b fallback
         if fmt in ["flac", "wav", "alac"]:
             q_arg = "0"
         elif quality in ["320", "256", "192", "128", "96", "160"]:
@@ -169,6 +169,7 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
             q_arg = "320k"
 
         cmd.extend([
+            "-f", "ba/b",
             "--extract-audio",
             "--audio-format", fmt,
             "--audio-quality", q_arg,
