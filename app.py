@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AudioFlow - Media Audio & Video Extractor
+SonicFlow - Media Audio & Video Extractor
 A modern desktop application to convert YouTube and Instagram links to high-quality audio
 (MP3, FLAC, WAV, AAC, OPUS, ALAC) or MP4 video (480p up to 4K Ultra HD).
 """
@@ -71,7 +71,7 @@ class AudioExtractorApp(BaseApp):
     def __init__(self):
         super().__init__()
 
-        self.title("AudioFlow — Media Audio & Video Downloader")
+        self.title("SonicFlow — Media Audio & Video Downloader")
         self.geometry("780x760")
         self.minsize(700, 680)
 
@@ -107,7 +107,7 @@ class AudioExtractorApp(BaseApp):
 
         title_lbl = ctk.CTkLabel(
             header_frame,
-            text="🎵 AudioFlow",
+            text="🎵 SonicFlow",
             font=ctk.CTkFont(size=26, weight="bold"),
             text_color="#38bdf8"
         )
@@ -438,7 +438,7 @@ class AudioExtractorApp(BaseApp):
 
     def _setup_tk_fallback_ui(self):
         self.configure(bg="#181a20")
-        lbl = tk.Label(self, text="AudioFlow", font=("Helvetica", 18, "bold"), fg="#38bdf8", bg="#181a20")
+        lbl = tk.Label(self, text="SonicFlow", font=("Helvetica", 18, "bold"), fg="#38bdf8", bg="#181a20")
         lbl.pack(pady=10)
         self.url_box = tk.Text(self, height=4, width=60, bg="#0f172a", fg="#ffffff")
         self.url_box.pack(pady=10)

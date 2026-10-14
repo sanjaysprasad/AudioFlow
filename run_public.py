@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AudioFlow Public Launcher
+SonicFlow Public Launcher
 Starts the local FastAPI server and creates an instant, free Cloudflare HTTPS tunnel.
 Works on mobile and PC anywhere in the world with zero accounts or configuration.
 """
@@ -30,7 +30,7 @@ def find_cloudflared():
 
 def main():
     print("=" * 60)
-    print("🚀 Launching AudioFlow Public Website...")
+    print("🚀 Launching SonicFlow Public Website...")
     print("=" * 60)
 
     cloudflared_bin = find_cloudflared()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AudioFlow Web Server — Responsive YouTube & Instagram Media Extractor
+SonicFlow Web Server — Responsive YouTube & Instagram Media Extractor
 FastAPI backend supporting both High-Quality Audio (MP3, FLAC, WAV, AAC, OPUS)
 and Video (MP4 from 480p up to 4K Ultra HD) with background workers and auto-cleanup.
 """
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="AudioFlow Web", version="1.1.0")
+app = FastAPI(title="SonicFlow Web", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TEMP_DIR = Path("/tmp/audioflow_web")
+TEMP_DIR = Path("/tmp/sonicflow_web")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # In-memory job state store
@@ -278,7 +278,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AudioFlow — YouTube & Instagram Audio/Video Downloader</title>
+    <title>SonicFlow — YouTube & Instagram Audio/Video Downloader</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
@@ -320,7 +320,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-sky-500/20">
                     <i class="fa-solid fa-bolt text-lg"></i>
                 </div>
-                <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">AudioFlow</span>
+                <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">SonicFlow</span>
             </div>
             <div class="flex items-center space-x-2">
                 <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
@@ -479,7 +479,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     <!-- Footer -->
     <footer class="w-full text-center py-6 text-slate-600 text-xs border-t border-slate-800/60">
-        AudioFlow &copy; 2026 &bull; High-Quality Media Downloader
+        SonicFlow &copy; 2026 &bull; High-Quality Media Downloader
     </footer>
 
     <!-- App Script -->

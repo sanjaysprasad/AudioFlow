@@ -1,4 +1,4 @@
-# 🎵 AudioFlow — YouTube & Instagram Media Downloader
+# 🎵 SonicFlow — YouTube & Instagram Media Downloader
 
 > A fast, studio-grade media extractor for **YouTube** and **Instagram**, featuring both a **macOS Desktop GUI** and a **Mobile/PC Responsive Web Application**. Supports high-fidelity audio (MP3, FLAC, WAV, AAC, OPUS) and MP4 video (480p up to 4K Ultra HD).
 
@@ -60,8 +60,8 @@ python3 app.py
 
 Build and run with Docker:
 ```bash
-docker build -t audioflow .
-docker run -p 7860:7860 audioflow
+docker build -t sonicflow .
+docker run -p 7860:7860 sonicflow
 ```
 
 ---

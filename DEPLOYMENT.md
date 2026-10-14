@@ -1,4 +1,4 @@
-# 🌐 Free Ways to Make AudioFlow Public (Mobile & PC)
+# 🌐 Free Ways to Make SonicFlow Public (Mobile & PC)
 
 Here are the best **100% free** methods to share your website with anyone on mobile or desktop:
 
@@ -30,7 +30,7 @@ Hugging Face provides **free 24/7 Docker hosting** (2 vCPU, 16 GB RAM) with pre-
 1. Go to [huggingface.co](https://huggingface.co) and sign up for a free account.
 2. Click **New Space** (or go to `huggingface.co/new-space`).
 3. Set:
-   - **Space Name**: `audioflow`
+   - **Space Name**: `sonicflow`
    - **License**: `MIT`
    - **Space SDK**: Select **Docker** (Blank)
    - **Space Hardware**: Free (CPU basic - 2 vCPU · 16 GB)
@@ -39,7 +39,7 @@ Hugging Face provides **free 24/7 Docker hosting** (2 vCPU, 16 GB RAM) with pre-
    - `requirements.txt`
    - `server.py`
 5. Click **Commit Changes**.
-6. Hugging Face will automatically build the container and provide your permanent public URL (e.g., `https://yourusername-audioflow.hf.space`).
+6. Hugging Face will automatically build the container and provide your permanent public URL (e.g., `https://yourusername-sonicflow.hf.space`).
 
 ---
 
@@ -50,7 +50,7 @@ Hugging Face provides **free 24/7 Docker hosting** (2 vCPU, 16 GB RAM) with pre-
 3. Click **New** -> **Web Service** -> Connect your GitHub repo.
 4. Select **Docker** as the environment.
 5. Choose the **Free** instance type.
-6. Click **Deploy**. Your app will be live on `https://audioflow.onrender.com`.
+6. Click **Deploy**. Your app will be live on `https://sonicflow.onrender.com`.
 
 ---
 

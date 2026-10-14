@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: audioflow
+    name: sonicflow
     runtime: docker
     plan: free
     region: oregon
