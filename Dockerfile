@@ -6,22 +6,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up non-root user (best practice and required for Hugging Face Spaces)
-RUN useradd -m -u 1000 user
-USER user
-ENV HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH
-
-WORKDIR $HOME/app
+WORKDIR /app
 
 # Install python dependencies
-COPY --chown=user requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy server code
-COPY --chown=user server.py .
+COPY server.py .
 
-# Standard port (7860 for Hugging Face, or Render dynamic $PORT)
-EXPOSE 7860
+# Render default port
+EXPOSE 10000
+ENV PORT=10000
 
-CMD ["sh", "-c", "python3 -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "python3 -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-10000}"]
