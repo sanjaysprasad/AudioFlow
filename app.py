@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AudioFlow - Media Audio Extractor
+AudioFlow - Media Audio & Video Extractor
 A modern desktop application to convert YouTube and Instagram links to high-quality audio
-(MP3, FLAC, WAV, AAC, OPUS, ALAC).
+(MP3, FLAC, WAV, AAC, OPUS, ALAC) or MP4 video (480p up to 4K Ultra HD).
 """
 
 import os
@@ -22,7 +22,6 @@ try:
 except ImportError:
     HAS_CTK = False
 
-# Fallback or appearance configuration
 if HAS_CTK:
     ctk.set_appearance_mode("Dark")
     ctk.set_default_color_theme("blue")
@@ -56,17 +55,13 @@ def sanitize_url(raw_url: str) -> str:
     if not url:
         return ""
 
-    # YouTube Music -> Standard YouTube (yt-dlp handles both, but standard watch URLs are faster)
     url = url.replace("music.youtube.com", "www.youtube.com")
 
-    # Short youtu.be links
     if "youtu.be/" in url:
         video_id = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
         url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # Remove tracking query parameters (si, igsh, utm_*, fbclid)
     url = re.sub(r'([?&])(si|igsh|utm_[a-zA-Z0-9_]+|fbclid)=[^&#]*', r'\1', url)
-    # Clean up trailing ? or &
     url = url.replace("?&", "?").rstrip("?&")
 
     return url
@@ -76,9 +71,9 @@ class AudioExtractorApp(BaseApp):
     def __init__(self):
         super().__init__()
 
-        self.title("AudioFlow — YouTube & Instagram Audio Extractor")
-        self.geometry("780x740")
-        self.minsize(700, 650)
+        self.title("AudioFlow — Media Audio & Video Downloader")
+        self.geometry("780x760")
+        self.minsize(700, 680)
 
         # Download state
         self.is_downloading = False
@@ -97,15 +92,10 @@ class AudioExtractorApp(BaseApp):
         else:
             self._setup_tk_fallback_ui()
 
-    # -------------------------------------------------------------
-    # CustomTkinter UI Implementation
-    # -------------------------------------------------------------
     def _setup_ctk_ui(self):
-        # Configure grid
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Main scrollable or root container
         self.container = ctk.CTkScrollableFrame(self, corner_radius=0, fg_color="transparent")
         self.container.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
         self.container.grid_columnconfigure(0, weight=1)
@@ -125,7 +115,7 @@ class AudioExtractorApp(BaseApp):
 
         subtitle_lbl = ctk.CTkLabel(
             header_frame,
-            text="Extract studio-quality audio from YouTube videos/shorts/playlists & Instagram reels/posts.",
+            text="Extract audio (MP3, FLAC, WAV, AAC) or MP4 video (480p to 4K) from YouTube & Instagram.",
             font=ctk.CTkFont(size=13),
             text_color="#94a3b8"
         )
@@ -159,6 +149,18 @@ class AudioExtractorApp(BaseApp):
         )
         ig_badge.pack(side="left", padx=(0, 8))
 
+        vid_badge = ctk.CTkLabel(
+            badge_frame,
+            text="🎬 4K MP4 Video",
+            fg_color="#6366f1",
+            text_color="#ffffff",
+            corner_radius=6,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            padx=10,
+            pady=3
+        )
+        vid_badge.pack(side="left", padx=(0, 8))
+
         status_pill = ctk.CTkLabel(
             badge_frame,
             text=f"FFmpeg: {'✓ Ready' if os.path.exists(self.ffmpeg_path) else '⚠ Not Found'}",
@@ -184,7 +186,6 @@ class AudioExtractorApp(BaseApp):
         )
         input_title.grid(row=0, column=0, sticky="w", padx=20, pady=(16, 8))
 
-        # Textbox for URLs
         self.url_box = ctk.CTkTextbox(
             input_frame,
             height=85,
@@ -196,7 +197,6 @@ class AudioExtractorApp(BaseApp):
         )
         self.url_box.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
 
-        # Action buttons for URL
         url_btn_frame = ctk.CTkFrame(input_frame, fg_color="transparent")
         url_btn_frame.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 16))
 
@@ -224,16 +224,15 @@ class AudioExtractorApp(BaseApp):
         )
         clear_btn.pack(side="left")
 
-        # 3. Settings Card Frame (Format, Quality, Output)
+        # 3. Settings Card Frame
         settings_frame = ctk.CTkFrame(self.container, fg_color="#181a20", corner_radius=14)
         settings_frame.grid(row=2, column=0, sticky="ew", pady=(0, 16), padx=4)
         settings_frame.grid_columnconfigure(0, weight=1)
         settings_frame.grid_columnconfigure(1, weight=1)
 
-        # Left Column: Format & Quality
         fmt_lbl = ctk.CTkLabel(
             settings_frame,
-            text="Audio Format & Quality",
+            text="Format & Quality Settings",
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color="#e2e8f0"
         )
@@ -249,7 +248,7 @@ class AudioExtractorApp(BaseApp):
         self.format_dropdown = ctk.CTkOptionMenu(
             fmt_row,
             variable=self.format_var,
-            values=["MP3", "FLAC", "WAV", "AAC", "OPUS", "ALAC"],
+            values=["MP3", "FLAC", "WAV", "AAC", "OPUS", "ALAC", "MP4 (Video)"],
             command=self.on_format_changed,
             fg_color="#2563eb",
             button_color="#1d4ed8",
@@ -257,12 +256,14 @@ class AudioExtractorApp(BaseApp):
         )
         self.format_dropdown.grid(row=1, column=0, sticky="ew")
 
-        # Quality Dropdown
+        # Quality / Resolution Dropdown
         quality_row = ctk.CTkFrame(settings_frame, fg_color="transparent")
         quality_row.grid(row=1, column=1, sticky="ew", padx=(10, 20), pady=(0, 12))
         quality_row.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(quality_row, text="Quality / Bitrate:", font=ctk.CTkFont(size=13), text_color="#cbd5e1").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.quality_label = ctk.CTkLabel(quality_row, text="Audio Quality / Bitrate:", font=ctk.CTkFont(size=13), text_color="#cbd5e1")
+        self.quality_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+
         self.quality_var = ctk.StringVar(value="320 kbps (Maximum)")
         self.quality_dropdown = ctk.CTkOptionMenu(
             quality_row,
@@ -327,7 +328,7 @@ class AudioExtractorApp(BaseApp):
         self.embed_thumb_var = ctk.BooleanVar(value=True)
         self.thumb_chk = ctk.CTkCheckBox(
             opts_frame,
-            text="Embed Cover Artwork",
+            text="Embed Thumbnail",
             variable=self.embed_thumb_var,
             font=ctk.CTkFont(size=12)
         )
@@ -336,7 +337,7 @@ class AudioExtractorApp(BaseApp):
         self.embed_meta_var = ctk.BooleanVar(value=True)
         self.meta_chk = ctk.CTkCheckBox(
             opts_frame,
-            text="Embed Metadata (Artist/Title)",
+            text="Embed Metadata",
             variable=self.embed_meta_var,
             font=ctk.CTkFont(size=12)
         )
@@ -345,7 +346,7 @@ class AudioExtractorApp(BaseApp):
         self.playlist_var = ctk.BooleanVar(value=True)
         self.playlist_chk = ctk.CTkCheckBox(
             opts_frame,
-            text="Download Full Playlist (if detected)",
+            text="Download Full Playlist",
             variable=self.playlist_var,
             font=ctk.CTkFont(size=12)
         )
@@ -384,12 +385,10 @@ class AudioExtractorApp(BaseApp):
         )
         self.cancel_btn.grid(row=0, column=1, sticky="ew")
 
-        # Progress bar
         self.progress_bar = ctk.CTkProgressBar(action_frame, height=10, corner_radius=5)
         self.progress_bar.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         self.progress_bar.set(0)
 
-        # Status Label
         self.status_lbl = ctk.CTkLabel(
             action_frame,
             text="Status: Ready",
@@ -437,41 +436,45 @@ class AudioExtractorApp(BaseApp):
         )
         self.log_box.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
 
-    # -------------------------------------------------------------
-    # Fallback Standard Tkinter UI
-    # -------------------------------------------------------------
     def _setup_tk_fallback_ui(self):
-        # Basic tkinter styling if ctk isn't installed
         self.configure(bg="#181a20")
-        lbl = tk.Label(self, text="AudioFlow (Standard Tk Mode)", font=("Helvetica", 18, "bold"), fg="#38bdf8", bg="#181a20")
+        lbl = tk.Label(self, text="AudioFlow", font=("Helvetica", 18, "bold"), fg="#38bdf8", bg="#181a20")
         lbl.pack(pady=10)
         self.url_box = tk.Text(self, height=4, width=60, bg="#0f172a", fg="#ffffff")
         self.url_box.pack(pady=10)
 
-    # -------------------------------------------------------------
-    # UI Callbacks & Logic
-    # -------------------------------------------------------------
     def on_format_changed(self, choice):
         fmt = choice.upper()
-        if fmt in ["FLAC", "WAV", "ALAC"]:
+        if "MP4" in fmt:
+            self.quality_label.configure(text="Video Resolution:")
+            self.quality_dropdown.configure(
+                values=["4K (2160p)", "2K (1440p)", "Full HD (1080p)", "HD (720p)", "SD (480p)", "Best Available"],
+                state="normal"
+            )
+            self.quality_var.set("Full HD (1080p)")
+        elif fmt in ["FLAC", "WAV", "ALAC"]:
+            self.quality_label.configure(text="Audio Quality:")
             self.quality_dropdown.configure(
                 values=["Lossless (Original Fidelity)"],
                 state="disabled"
             )
             self.quality_var.set("Lossless (Original Fidelity)")
         elif fmt == "MP3":
+            self.quality_label.configure(text="Audio Quality / Bitrate:")
             self.quality_dropdown.configure(
                 values=["320 kbps (Maximum)", "256 kbps (High)", "192 kbps (Standard)", "128 kbps (Compact)", "Best VBR (0)"],
                 state="normal"
             )
             self.quality_var.set("320 kbps (Maximum)")
         elif fmt == "AAC":
+            self.quality_label.configure(text="Audio Quality / Bitrate:")
             self.quality_dropdown.configure(
                 values=["320 kbps (High)", "256 kbps", "192 kbps", "128 kbps"],
                 state="normal"
             )
             self.quality_var.set("256 kbps")
         elif fmt == "OPUS":
+            self.quality_label.configure(text="Audio Quality / Bitrate:")
             self.quality_dropdown.configure(
                 values=["160 kbps (Transparent)", "128 kbps (Standard)", "96 kbps (Compact)"],
                 state="normal"
@@ -522,9 +525,6 @@ class AudioExtractorApp(BaseApp):
         if progress is not None:
             self.progress_bar.set(progress)
 
-    # -------------------------------------------------------------
-    # Download Execution
-    # -------------------------------------------------------------
     def start_download(self):
         raw_text = self.url_box.get("1.0", "end").strip()
         if not raw_text:
@@ -547,9 +547,8 @@ class AudioExtractorApp(BaseApp):
         self.download_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
         self.progress_bar.set(0)
-        self.update_status(f"Starting conversion of {len(urls)} link(s)...", 0.05)
+        self.update_status(f"Starting processing of {len(urls)} link(s)...", 0.05)
 
-        # Launch in background thread
         self.download_thread = threading.Thread(
             target=self._run_downloader_thread,
             args=(urls, destination),
@@ -570,10 +569,22 @@ class AudioExtractorApp(BaseApp):
             self.cancel_btn.configure(state="disabled")
 
     def _parse_quality_arg(self, fmt, raw_quality):
-        """Map user-selected quality string to yt-dlp audio quality parameter."""
         fmt = fmt.lower()
+        if "mp4" in fmt:
+            if "2160" in raw_quality or "4k" in raw_quality.lower():
+                return "2160"
+            elif "1440" in raw_quality or "2k" in raw_quality.lower():
+                return "1440"
+            elif "1080" in raw_quality:
+                return "1080"
+            elif "720" in raw_quality:
+                return "720"
+            elif "480" in raw_quality:
+                return "480"
+            return "best"
+
         if fmt in ["flac", "wav", "alac"]:
-            return "0"  # Lossless
+            return "0"
         if "320" in raw_quality:
             return "320k"
         elif "256" in raw_quality:
@@ -589,8 +600,9 @@ class AudioExtractorApp(BaseApp):
         return "0"
 
     def _run_downloader_thread(self, urls, destination):
-        fmt_choice = self.format_var.get().lower()
-        quality_choice = self._parse_quality_arg(fmt_choice, self.quality_var.get())
+        fmt_raw = self.format_var.get().lower()
+        is_video = "mp4" in fmt_raw
+        quality_choice = self._parse_quality_arg(fmt_raw, self.quality_var.get())
         embed_thumbnail = self.embed_thumb_var.get()
         embed_metadata = self.embed_meta_var.get()
         allow_playlist = self.playlist_var.get()
@@ -604,14 +616,27 @@ class AudioExtractorApp(BaseApp):
             self.after(0, self.append_log, f"\n{'='*50}\n[{idx}/{total}] Processing: {url}\n{'='*50}")
             self.after(0, self.update_status, f"Processing {idx}/{total}: {url[:40]}...", (idx - 1) / total)
 
-            # Build command using python -m yt_dlp
-            cmd = [
-                sys.executable, "-m", "yt_dlp",
-                "--extract-audio",
-                "--audio-format", fmt_choice,
-                "--audio-quality", quality_choice,
-                "-o", os.path.join(destination, "%(title)s.%(ext)s")
-            ]
+            if is_video:
+                if quality_choice in ["2160", "1440", "1080", "720", "480"]:
+                    fmt_str = f"bestvideo[height<={quality_choice}]+bestaudio/best[height<={quality_choice}]/best"
+                else:
+                    fmt_str = "bestvideo+bestaudio/best"
+
+                cmd = [
+                    sys.executable, "-m", "yt_dlp",
+                    "-f", fmt_str,
+                    "--merge-output-format", "mp4",
+                    "-o", os.path.join(destination, "%(title)s.%(ext)s")
+                ]
+            else:
+                fmt_choice = fmt_raw
+                cmd = [
+                    sys.executable, "-m", "yt_dlp",
+                    "--extract-audio",
+                    "--audio-format", fmt_choice,
+                    "--audio-quality", quality_choice,
+                    "-o", os.path.join(destination, "%(title)s.%(ext)s")
+                ]
 
             if embed_metadata:
                 cmd.append("--add-metadata")
@@ -623,7 +648,6 @@ class AudioExtractorApp(BaseApp):
             else:
                 cmd.append("--no-playlist")
 
-            # Point to FFmpeg if detected
             ffmpeg_dir = os.path.dirname(self.ffmpeg_path) if self.ffmpeg_path else "/opt/homebrew/bin"
             if os.path.exists(ffmpeg_dir):
                 cmd.extend(["--ffmpeg-location", ffmpeg_dir])
@@ -647,15 +671,15 @@ class AudioExtractorApp(BaseApp):
 
                     self.after(0, self.append_log, clean_line)
 
-                    # Extract percentage from yt-dlp output e.g. [download]  45.3% of 12.34MiB at 4.25MiB/s
                     if "[download]" in clean_line and "%" in clean_line:
                         match = re.search(r'(\d+(?:\.\d+)?)%', clean_line)
                         if match:
                             pct = float(match.group(1)) / 100.0
                             overall_pct = ((idx - 1) + pct) / total
                             self.after(0, self.update_status, f"[{idx}/{total}] Downloading: {clean_line[:60]}", overall_pct)
-                    elif "[ExtractAudio]" in clean_line or "[ffmpeg]" in clean_line:
-                        self.after(0, self.update_status, f"[{idx}/{total}] Converting audio to {fmt_choice.upper()}...")
+                    elif "[ExtractAudio]" in clean_line or "[ffmpeg]" in clean_line or "[Merger]" in clean_line:
+                        target_name = "MP4 Video" if is_video else fmt_raw.upper()
+                        self.after(0, self.update_status, f"[{idx}/{total}] Finalizing {target_name}...")
 
                 self.current_process.wait()
                 rc = self.current_process.returncode
@@ -676,7 +700,7 @@ class AudioExtractorApp(BaseApp):
             self.cancel_btn.configure(state="disabled")
             self.progress_bar.set(1.0)
             self.update_status("Done! All items processed.", 1.0)
-            messagebox.showinfo("Success", f"All conversions finished!\nAudio files saved to:\n{destination}")
+            messagebox.showinfo("Success", f"All conversions finished!\nFiles saved to:\n{destination}")
 
         self.after(0, finalize)
 

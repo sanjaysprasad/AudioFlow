@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-AudioFlow Web Server — Responsive YouTube & Instagram Audio Extractor
-FastAPI backend with background conversion worker and auto-cleanup.
+AudioFlow Web Server — Responsive YouTube & Instagram Media Extractor
+FastAPI backend supporting both High-Quality Audio (MP3, FLAC, WAV, AAC, OPUS)
+and Video (MP4 from 480p up to 4K Ultra HD) with background workers and auto-cleanup.
 """
 
 import os
@@ -20,7 +21,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="AudioFlow Web", version="1.0.0")
+app = FastAPI(title="AudioFlow Web", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,38 +94,58 @@ def cleanup_old_files():
 
 
 def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
-    """Background worker to download and convert the audio."""
+    """Background worker to download and process audio or video."""
     job_folder = TEMP_DIR / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
 
+    fmt = fmt.lower()
+    is_video = (fmt == "mp4")
+
     jobs[job_id]["status"] = "processing"
     jobs[job_id]["progress"] = 10
-    jobs[job_id]["message"] = "Fetching media metadata..."
-
-    # Determine bitrate/quality flag
-    fmt = fmt.lower()
-    if fmt in ["flac", "wav", "alac"]:
-        q_arg = "0"
-    elif quality in ["320", "256", "192", "128", "96", "160"]:
-        q_arg = f"{quality}k"
-    else:
-        q_arg = "320k"
+    jobs[job_id]["message"] = f"Fetching {'video' if is_video else 'audio'} metadata..."
 
     output_template = str(job_folder / "%(title)s.%(ext)s")
-
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--extract-audio",
-        "--audio-format", fmt,
-        "--audio-quality", q_arg,
-        "--add-metadata",
-        "--embed-thumbnail",
-        "--no-playlist",
-        "-o", output_template
-    ]
-
     ffmpeg_bin = find_ffmpeg()
     ffmpeg_dir = os.path.dirname(ffmpeg_bin)
+
+    if is_video:
+        # Video MP4 handling with resolution (480p up to 4K 2160p)
+        res = quality.strip().lower().replace("p", "")
+        if res in ["480", "720", "1080", "1440", "2160"]:
+            fmt_str = f"bestvideo[height<={res}]+bestaudio/best[height<={res}]/best"
+        else:
+            fmt_str = "bestvideo+bestaudio/best"
+
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "-f", fmt_str,
+            "--merge-output-format", "mp4",
+            "--add-metadata",
+            "--embed-thumbnail",
+            "--no-playlist",
+            "-o", output_template
+        ]
+    else:
+        # Audio handling (MP3, FLAC, WAV, AAC, OPUS, ALAC)
+        if fmt in ["flac", "wav", "alac"]:
+            q_arg = "0"
+        elif quality in ["320", "256", "192", "128", "96", "160"]:
+            q_arg = f"{quality}k"
+        else:
+            q_arg = "320k"
+
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--extract-audio",
+            "--audio-format", fmt,
+            "--audio-quality", q_arg,
+            "--add-metadata",
+            "--embed-thumbnail",
+            "--no-playlist",
+            "-o", output_template
+        ]
+
     if os.path.exists(ffmpeg_dir):
         cmd.extend(["--ffmpeg-location", ffmpeg_dir])
 
@@ -149,37 +170,35 @@ def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
                 match = re.search(r'(\d+(?:\.\d+)?)%', clean)
                 if match:
                     pct = float(match.group(1))
-                    # Map download percentage to 10% - 85% range
                     mapped = 10 + int(pct * 0.75)
                     jobs[job_id]["progress"] = mapped
-                    jobs[job_id]["message"] = f"Downloading audio: {clean}"
-            elif "[ExtractAudio]" in clean or "[ffmpeg]" in clean:
+                    jobs[job_id]["message"] = f"Downloading: {clean}"
+            elif "[ExtractAudio]" in clean or "[ffmpeg]" in clean or "[Merger]" in clean:
                 jobs[job_id]["progress"] = 90
-                jobs[job_id]["message"] = f"Converting audio to {fmt.upper()}..."
+                jobs[job_id]["message"] = f"Muxing and processing {fmt.upper()}..."
 
         proc.wait()
 
         if proc.returncode == 0:
-            # Find the converted audio file
-            produced_files = list(job_folder.glob(f"*.{fmt}"))
+            target_ext = "mp4" if is_video else fmt
+            produced_files = list(job_folder.glob(f"*.{target_ext}"))
             if not produced_files:
-                # Fallback to any audio file in the folder
                 produced_files = [f for f in job_folder.iterdir() if f.is_file() and not f.name.endswith(".part")]
 
             if produced_files:
-                audio_file = produced_files[0]
+                output_file = produced_files[0]
                 jobs[job_id]["status"] = "completed"
                 jobs[job_id]["progress"] = 100
                 jobs[job_id]["message"] = "Ready to download!"
-                jobs[job_id]["file_path"] = str(audio_file)
-                jobs[job_id]["file_name"] = audio_file.name
-                jobs[job_id]["file_size"] = os.path.getsize(audio_file)
+                jobs[job_id]["file_path"] = str(output_file)
+                jobs[job_id]["file_name"] = output_file.name
+                jobs[job_id]["file_size"] = os.path.getsize(output_file)
             else:
                 jobs[job_id]["status"] = "error"
-                jobs[job_id]["message"] = "Conversion finished, but output file was not found."
+                jobs[job_id]["message"] = "Processing completed, but output file was not found."
         else:
             jobs[job_id]["status"] = "error"
-            jobs[job_id]["message"] = f"yt-dlp failed (exit code {proc.returncode}). The link may be private or protected."
+            jobs[job_id]["message"] = f"yt-dlp failed (exit code {proc.returncode}). The link may be private or restricted."
 
     except Exception as e:
         jobs[job_id]["status"] = "error"
@@ -194,7 +213,6 @@ async def start_conversion(payload: ConvertRequest, background_tasks: Background
     if not clean_url:
         raise HTTPException(status_code=400, detail="Please enter a valid URL.")
 
-    # Validate supported domains
     if not any(domain in clean_url.lower() for domain in ["youtube.com", "youtu.be", "instagram.com"]):
         raise HTTPException(status_code=400, detail="Only YouTube and Instagram URLs are currently supported.")
 
@@ -208,7 +226,6 @@ async def start_conversion(payload: ConvertRequest, background_tasks: Background
         "file_name": None
     }
 
-    # Run conversion in background task
     background_tasks.add_task(run_yt_dlp_worker, job_id, clean_url, payload.format, payload.quality)
 
     return {"job_id": job_id, "status": "queued"}
@@ -221,16 +238,8 @@ async def get_job_status(job_id: str):
     return jobs[job_id]
 
 
-def remove_job_folder(job_folder_path: str):
-    """Delayed cleanup after streaming response finishes."""
-    try:
-        shutil.rmtree(job_folder_path, ignore_errors=True)
-    except Exception:
-        pass
-
-
 @app.get("/api/download/{job_id}")
-async def download_file(job_id: str, background_tasks: BackgroundTasks):
+async def download_file(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Download expired or not found.")
 
@@ -248,7 +257,8 @@ async def download_file(job_id: str, background_tasks: BackgroundTasks):
         "wav": "audio/wav",
         "aac": "audio/aac",
         "m4a": "audio/mp4",
-        "opus": "audio/opus"
+        "opus": "audio/opus",
+        "mp4": "video/mp4"
     }
     ext = file_path.suffix.lstrip(".").lower()
     media_type = media_types.get(ext, "application/octet-stream")
@@ -268,7 +278,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AudioFlow — YouTube & Instagram Audio Extractor</title>
+    <title>AudioFlow — YouTube & Instagram Audio/Video Downloader</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
@@ -279,10 +289,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                 extend: {
                     colors: {
                         brand: {
-                            50: '#f0f9ff',
                             500: '#0284c7',
-                            600: '#0369a1',
-                            700: '#075985'
+                            600: '#0369a1'
                         }
                     }
                 }
@@ -310,7 +318,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div class="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
             <div class="flex items-center space-x-3">
                 <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-sky-500/20">
-                    <i class="fa-solid fa-music text-lg"></i>
+                    <i class="fa-solid fa-bolt text-lg"></i>
                 </div>
                 <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">AudioFlow</span>
             </div>
@@ -330,10 +338,10 @@ HTML_CONTENT = """<!DOCTYPE html>
             <!-- Hero Text -->
             <div class="text-center mb-8">
                 <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight text-white mb-3">
-                    Convert Media to <span class="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">Studio Audio</span>
+                    Download <span class="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">Audio & Video</span>
                 </h1>
                 <p class="text-slate-400 text-sm sm:text-base max-w-md mx-auto">
-                    Extract crystal clear MP3, FLAC, and WAV audio from YouTube and Instagram in seconds.
+                    Convert YouTube & Instagram links to high-quality audio (MP3, FLAC) or HD/4K MP4 video.
                 </p>
 
                 <!-- Supported Platform Badges -->
@@ -342,7 +350,10 @@ HTML_CONTENT = """<!DOCTYPE html>
                         <i class="fa-brands fa-youtube text-red-500"></i> YouTube
                     </span>
                     <span class="px-3 py-1 rounded-lg text-xs font-semibold bg-pink-500/10 text-pink-400 border border-pink-500/20 flex items-center gap-1.5">
-                        <i class="fa-brands fa-instagram text-pink-400"></i> Instagram Reels / Posts
+                        <i class="fa-brands fa-instagram text-pink-400"></i> Instagram Reels
+                    </span>
+                    <span class="px-3 py-1 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 flex items-center gap-1.5">
+                        <i class="fa-solid fa-video text-indigo-400"></i> Up to 4K
                     </span>
                 </div>
             </div>
@@ -374,29 +385,34 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <!-- Format & Quality Options Grid -->
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                     <div>
-                        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Audio Format</label>
+                        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Format</label>
                         <select 
                             id="formatSelect"
                             onchange="updateQualityOptions()"
                             class="w-full bg-slate-900/90 text-white rounded-xl px-4 py-3 text-sm border border-slate-700/80 focus:outline-none focus:border-sky-500 transition"
                         >
-                            <option value="mp3" selected>MP3 (Universal)</option>
-                            <option value="flac">FLAC (Lossless Studio)</option>
-                            <option value="wav">WAV (Uncompressed)</option>
-                            <option value="aac">AAC / M4A (High Efficiency)</option>
-                            <option value="opus">OPUS (Next-Gen)</option>
+                            <optgroup label="Audio Formats">
+                                <option value="mp3" selected>🎵 MP3 (Universal Audio)</option>
+                                <option value="flac">💎 FLAC (Lossless Master)</option>
+                                <option value="wav">🎼 WAV (Uncompressed)</option>
+                                <option value="aac">🎧 AAC / M4A (Efficient)</option>
+                                <option value="opus">⚡ OPUS (Next-Gen)</option>
+                            </optgroup>
+                            <optgroup label="Video Formats">
+                                <option value="mp4">🎬 MP4 Video (480p to 4K)</option>
+                            </optgroup>
                         </select>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Audio Quality</label>
+                        <label id="qualityLabel" class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Audio Quality</label>
                         <select 
                             id="qualitySelect"
                             class="w-full bg-slate-900/90 text-white rounded-xl px-4 py-3 text-sm border border-slate-700/80 focus:outline-none focus:border-sky-500 transition"
                         >
-                            <option value="320" selected>320 kbps (Maximum)</option>
-                            <option value="256">256 kbps (High)</option>
-                            <option value="192">192 kbps (Standard)</option>
+                            <option value="320" selected>320 kbps (Maximum Quality)</option>
+                            <option value="256">256 kbps (High Quality)</option>
+                            <option value="192">192 kbps (Standard Quality)</option>
                             <option value="128">128 kbps (Compact)</option>
                         </select>
                     </div>
@@ -409,10 +425,10 @@ HTML_CONTENT = """<!DOCTYPE html>
                     class="w-full bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-sky-500/25 active:scale-[0.99] transition flex items-center justify-center gap-2 text-base cursor-pointer"
                 >
                     <i class="fa-solid fa-bolt"></i>
-                    <span>Convert & Download Audio</span>
+                    <span>Convert & Download Media</span>
                 </button>
 
-                <!-- Processing Box (Hidden by default) -->
+                <!-- Processing Box -->
                 <div id="progressContainer" class="hidden mt-6 p-4 rounded-xl bg-slate-900/90 border border-slate-800">
                     <div class="flex items-center justify-between mb-2">
                         <span id="statusText" class="text-xs font-medium text-slate-300 truncate max-w-[280px] sm:max-w-sm">Initializing...</span>
@@ -432,7 +448,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                             download
                         >
                             <i class="fa-solid fa-cloud-arrow-down text-lg"></i>
-                            <span id="downloadBtnText">Download Audio File</span>
+                            <span id="downloadBtnText">Download File</span>
                         </a>
                     </div>
                 </div>
@@ -445,16 +461,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             <!-- Features Highlights -->
             <div class="grid grid-cols-3 gap-3 mt-8 text-center text-slate-400 text-xs">
                 <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
-                    <i class="fa-solid fa-bolt text-sky-400 text-base mb-1 block"></i>
-                    Fast Extraction
+                    <i class="fa-solid fa-film text-sky-400 text-base mb-1 block"></i>
+                    Up to 4K MP4
                 </div>
                 <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
                     <i class="fa-solid fa-compact-disc text-indigo-400 text-base mb-1 block"></i>
-                    Lossless Support
+                    Studio Audio
                 </div>
                 <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
                     <i class="fa-solid fa-shield-halved text-emerald-400 text-base mb-1 block"></i>
-                    100% Free & Safe
+                    100% Free
                 </div>
             </div>
 
@@ -463,7 +479,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     <!-- Footer -->
     <footer class="w-full text-center py-6 text-slate-600 text-xs border-t border-slate-800/60">
-        AudioFlow &copy; 2026 &bull; For personal and fair-use backup only
+        AudioFlow &copy; 2026 &bull; High-Quality Media Downloader
     </footer>
 
     <!-- App Script -->
@@ -471,26 +487,42 @@ HTML_CONTENT = """<!DOCTYPE html>
         function updateQualityOptions() {
             const format = document.getElementById('formatSelect').value;
             const qualitySelect = document.getElementById('qualitySelect');
+            const qualityLabel = document.getElementById('qualityLabel');
 
-            if (['flac', 'wav'].includes(format)) {
+            if (format === 'mp4') {
+                qualityLabel.textContent = "Video Resolution";
+                qualitySelect.innerHTML = `
+                    <option value="2160">2160p (4K Ultra HD)</option>
+                    <option value="1440">1440p (2K Quad HD)</option>
+                    <option value="1080" selected>1080p (Full HD)</option>
+                    <option value="720">720p (HD)</option>
+                    <option value="480">480p (Standard Definition)</option>
+                    <option value="best">Best Available Resolution</option>
+                `;
+                qualitySelect.disabled = false;
+            } else if (['flac', 'wav'].includes(format)) {
+                qualityLabel.textContent = "Audio Quality";
                 qualitySelect.innerHTML = '<option value="0" selected>Lossless (Best Original Fidelity)</option>';
                 qualitySelect.disabled = true;
             } else if (format === 'mp3') {
+                qualityLabel.textContent = "Audio Quality";
                 qualitySelect.innerHTML = `
-                    <option value="320" selected>320 kbps (Maximum)</option>
-                    <option value="256">256 kbps (High)</option>
-                    <option value="192">192 kbps (Standard)</option>
+                    <option value="320" selected>320 kbps (Maximum Quality)</option>
+                    <option value="256">256 kbps (High Quality)</option>
+                    <option value="192">192 kbps (Standard Quality)</option>
                     <option value="128">128 kbps (Compact)</option>
                 `;
                 qualitySelect.disabled = false;
             } else if (format === 'aac') {
+                qualityLabel.textContent = "Audio Quality";
                 qualitySelect.innerHTML = `
-                    <option value="320" selected>320 kbps (High)</option>
+                    <option value="320" selected>320 kbps (High Quality)</option>
                     <option value="256">256 kbps</option>
                     <option value="192">192 kbps</option>
                 `;
                 qualitySelect.disabled = false;
             } else if (format === 'opus') {
+                qualityLabel.textContent = "Audio Quality";
                 qualitySelect.innerHTML = `
                     <option value="160" selected>160 kbps (Transparent)</option>
                     <option value="128">128 kbps</option>
@@ -507,7 +539,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                     document.getElementById('urlInput').value = text.trim();
                 }
             } catch (err) {
-                // Clipboard permissions might be denied in some browsers
                 document.getElementById('urlInput').focus();
             }
         }
@@ -602,7 +633,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                         clearInterval(pollInterval);
                         submitBtn.disabled = false;
                         submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-                        errorBox.textContent = job.message || 'Conversion error occurred.';
+                        errorBox.textContent = job.message || 'Processing error occurred.';
                         errorBox.classList.remove('hidden');
                     }
                 } catch (err) {
@@ -621,7 +652,11 @@ async def serve_index():
     return HTMLResponse(content=HTML_CONTENT)
 
 
+@app.head("/")
+async def head_index():
+    return HTMLResponse(content="")
+
+
 if __name__ == "__main__":
     import uvicorn
-    # Bind to 0.0.0.0 so devices on your local network (like your phone) can connect
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
