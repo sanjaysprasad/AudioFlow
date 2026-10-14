@@ -49,7 +49,7 @@ python3 run_public.py
 Launch the standalone GUI:
 ```bash
 python3 app.py
-# Or double-click ytmp3.command
+# Or double-click launch_desktop.command
 ```
 
 ---
