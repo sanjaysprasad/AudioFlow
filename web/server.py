@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+"""
+AudioFlow Web Server — Responsive YouTube & Instagram Audio Extractor
+FastAPI backend with background conversion worker and auto-cleanup.
+"""
+
+import os
+import re
+import sys
+import time
+import uuid
+import shutil
+import asyncio
+import subprocess
+from pathlib import Path
+from typing import Dict, Any
+
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI(title="AudioFlow Web", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+TEMP_DIR = Path("/tmp/audioflow_web")
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# In-memory job state store
+jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def find_ffmpeg() -> str:
+    """Detect ffmpeg binary location."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    candidates = [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg"
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return "ffmpeg"
+
+
+def sanitize_url(raw_url: str) -> str:
+    """Normalize YouTube & Instagram URLs and strip tracking query parameters."""
+    url = raw_url.strip()
+    if not url:
+        return ""
+
+    url = url.replace("music.youtube.com", "www.youtube.com")
+
+    if "youtu.be/" in url:
+        video_id = url.split("youtu.be/")[1].split("?")[0].split("&")[0]
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Strip tracking parameters (si, igsh, utm_*, fbclid)
+    url = re.sub(r'([?&])(si|igsh|utm_[a-zA-Z0-9_]+|fbclid)=[^&#]*', r'\1', url)
+    url = url.replace("?&", "?").rstrip("?&")
+    return url
+
+
+class ConvertRequest(BaseModel):
+    url: str
+    format: str = "mp3"
+    quality: str = "320"
+
+
+def cleanup_old_files():
+    """Remove converted jobs older than 15 minutes to save server storage."""
+    now = time.time()
+    expired_jobs = []
+    for jid, job in list(jobs.items()):
+        if now - job.get("created_at", now) > 900:  # 15 minutes
+            expired_jobs.append(jid)
+            job_folder = TEMP_DIR / jid
+            if job_folder.exists():
+                shutil.rmtree(job_folder, ignore_errors=True)
+
+    for jid in expired_jobs:
+        jobs.pop(jid, None)
+
+
+def run_yt_dlp_worker(job_id: str, url: str, fmt: str, quality: str):
+    """Background worker to download and convert the audio."""
+    job_folder = TEMP_DIR / job_id
+    job_folder.mkdir(parents=True, exist_ok=True)
+
+    jobs[job_id]["status"] = "processing"
+    jobs[job_id]["progress"] = 10
+    jobs[job_id]["message"] = "Fetching media metadata..."
+
+    # Determine bitrate/quality flag
+    fmt = fmt.lower()
+    if fmt in ["flac", "wav", "alac"]:
+        q_arg = "0"
+    elif quality in ["320", "256", "192", "128", "96", "160"]:
+        q_arg = f"{quality}k"
+    else:
+        q_arg = "320k"
+
+    output_template = str(job_folder / "%(title)s.%(ext)s")
+
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--extract-audio",
+        "--audio-format", fmt,
+        "--audio-quality", q_arg,
+        "--add-metadata",
+        "--embed-thumbnail",
+        "--no-playlist",
+        "-o", output_template
+    ]
+
+    ffmpeg_bin = find_ffmpeg()
+    ffmpeg_dir = os.path.dirname(ffmpeg_bin)
+    if os.path.exists(ffmpeg_dir):
+        cmd.extend(["--ffmpeg-location", ffmpeg_dir])
+
+    cmd.append(url)
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        for line in proc.stdout:
+            clean = line.strip()
+            if not clean:
+                continue
+
+            if "[download]" in clean and "%" in clean:
+                match = re.search(r'(\d+(?:\.\d+)?)%', clean)
+                if match:
+                    pct = float(match.group(1))
+                    # Map download percentage to 10% - 85% range
+                    mapped = 10 + int(pct * 0.75)
+                    jobs[job_id]["progress"] = mapped
+                    jobs[job_id]["message"] = f"Downloading audio: {clean}"
+            elif "[ExtractAudio]" in clean or "[ffmpeg]" in clean:
+                jobs[job_id]["progress"] = 90
+                jobs[job_id]["message"] = f"Converting audio to {fmt.upper()}..."
+
+        proc.wait()
+
+        if proc.returncode == 0:
+            # Find the converted audio file
+            produced_files = list(job_folder.glob(f"*.{fmt}"))
+            if not produced_files:
+                # Fallback to any audio file in the folder
+                produced_files = [f for f in job_folder.iterdir() if f.is_file() and not f.name.endswith(".part")]
+
+            if produced_files:
+                audio_file = produced_files[0]
+                jobs[job_id]["status"] = "completed"
+                jobs[job_id]["progress"] = 100
+                jobs[job_id]["message"] = "Ready to download!"
+                jobs[job_id]["file_path"] = str(audio_file)
+                jobs[job_id]["file_name"] = audio_file.name
+                jobs[job_id]["file_size"] = os.path.getsize(audio_file)
+            else:
+                jobs[job_id]["status"] = "error"
+                jobs[job_id]["message"] = "Conversion finished, but output file was not found."
+        else:
+            jobs[job_id]["status"] = "error"
+            jobs[job_id]["message"] = f"yt-dlp failed (exit code {proc.returncode}). The link may be private or protected."
+
+    except Exception as e:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["message"] = f"Error: {str(e)}"
+
+
+@app.post("/api/convert")
+async def start_conversion(payload: ConvertRequest, background_tasks: BackgroundTasks):
+    cleanup_old_files()
+
+    clean_url = sanitize_url(payload.url)
+    if not clean_url:
+        raise HTTPException(status_code=400, detail="Please enter a valid URL.")
+
+    # Validate supported domains
+    if not any(domain in clean_url.lower() for domain in ["youtube.com", "youtu.be", "instagram.com"]):
+        raise HTTPException(status_code=400, detail="Only YouTube and Instagram URLs are currently supported.")
+
+    job_id = str(uuid.uuid4())[:8]
+    jobs[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "message": "Initializing...",
+        "created_at": time.time(),
+        "file_path": None,
+        "file_name": None
+    }
+
+    # Run conversion in background task
+    background_tasks.add_task(run_yt_dlp_worker, job_id, clean_url, payload.format, payload.quality)
+
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/status/{job_id}")
+async def get_job_status(job_id: str):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found or expired.")
+    return jobs[job_id]
+
+
+def remove_job_folder(job_folder_path: str):
+    """Delayed cleanup after streaming response finishes."""
+    try:
+        shutil.rmtree(job_folder_path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+@app.get("/api/download/{job_id}")
+async def download_file(job_id: str, background_tasks: BackgroundTasks):
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Download expired or not found.")
+
+    job = jobs[job_id]
+    if job.get("status") != "completed" or not job.get("file_path"):
+        raise HTTPException(status_code=400, detail="File is not ready yet.")
+
+    file_path = Path(job["file_path"])
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File on disk has been cleaned up.")
+
+    media_types = {
+        "mp3": "audio/mpeg",
+        "flac": "audio/flac",
+        "wav": "audio/wav",
+        "aac": "audio/aac",
+        "m4a": "audio/mp4",
+        "opus": "audio/opus"
+    }
+    ext = file_path.suffix.lstrip(".").lower()
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=job["file_name"],
+        media_type=media_type
+    )
+
+
+# -------------------------------------------------------------------------
+# Embedded Responsive HTML/Tailwind Frontend
+# -------------------------------------------------------------------------
+HTML_CONTENT = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AudioFlow — YouTube & Instagram Audio Extractor</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            500: '#0284c7',
+                            600: '#0369a1',
+                            700: '#075985'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #0b0f19;
+            color: #f8fafc;
+        }
+        .glass-card {
+            background: rgba(17, 24, 39, 0.75);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between selection:bg-sky-500 selection:text-white">
+
+    <!-- Navbar -->
+    <header class="w-full border-b border-slate-800/80 bg-slate-900/60 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-sky-500/20">
+                    <i class="fa-solid fa-music text-lg"></i>
+                </div>
+                <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">AudioFlow</span>
+            </div>
+            <div class="flex items-center space-x-2">
+                <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
+                    Online
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="flex-1 flex items-center justify-center p-4 sm:p-6 my-6">
+        <div class="w-full max-w-xl mx-auto">
+
+            <!-- Hero Text -->
+            <div class="text-center mb-8">
+                <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight text-white mb-3">
+                    Convert Media to <span class="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">Studio Audio</span>
+                </h1>
+                <p class="text-slate-400 text-sm sm:text-base max-w-md mx-auto">
+                    Extract crystal clear MP3, FLAC, and WAV audio from YouTube and Instagram in seconds.
+                </p>
+
+                <!-- Supported Platform Badges -->
+                <div class="flex items-center justify-center gap-2 mt-4">
+                    <span class="px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/10 text-red-400 border border-red-500/20 flex items-center gap-1.5">
+                        <i class="fa-brands fa-youtube text-red-500"></i> YouTube
+                    </span>
+                    <span class="px-3 py-1 rounded-lg text-xs font-semibold bg-pink-500/10 text-pink-400 border border-pink-500/20 flex items-center gap-1.5">
+                        <i class="fa-brands fa-instagram text-pink-400"></i> Instagram Reels / Posts
+                    </span>
+                </div>
+            </div>
+
+            <!-- Conversion Card -->
+            <div class="glass-card rounded-2xl p-5 sm:p-7 shadow-2xl shadow-black/50">
+                
+                <!-- URL Input Group -->
+                <div class="mb-5">
+                    <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Media URL</label>
+                    <div class="relative">
+                        <input 
+                            type="text" 
+                            id="urlInput"
+                            placeholder="Paste YouTube or Instagram link here..."
+                            class="w-full bg-slate-900/90 text-white placeholder-slate-500 rounded-xl px-4 py-3.5 pr-20 text-sm sm:text-base border border-slate-700/80 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition shadow-inner"
+                        />
+                        <button 
+                            id="pasteBtn"
+                            onclick="handlePaste()"
+                            class="absolute right-2 top-2 bottom-2 px-3 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-lg border border-slate-700 transition flex items-center gap-1"
+                        >
+                            <i class="fa-regular fa-clipboard"></i>
+                            <span class="hidden sm:inline">Paste</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Format & Quality Options Grid -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Audio Format</label>
+                        <select 
+                            id="formatSelect"
+                            onchange="updateQualityOptions()"
+                            class="w-full bg-slate-900/90 text-white rounded-xl px-4 py-3 text-sm border border-slate-700/80 focus:outline-none focus:border-sky-500 transition"
+                        >
+                            <option value="mp3" selected>MP3 (Universal)</option>
+                            <option value="flac">FLAC (Lossless Studio)</option>
+                            <option value="wav">WAV (Uncompressed)</option>
+                            <option value="aac">AAC / M4A (High Efficiency)</option>
+                            <option value="opus">OPUS (Next-Gen)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Audio Quality</label>
+                        <select 
+                            id="qualitySelect"
+                            class="w-full bg-slate-900/90 text-white rounded-xl px-4 py-3 text-sm border border-slate-700/80 focus:outline-none focus:border-sky-500 transition"
+                        >
+                            <option value="320" selected>320 kbps (Maximum)</option>
+                            <option value="256">256 kbps (High)</option>
+                            <option value="192">192 kbps (Standard)</option>
+                            <option value="128">128 kbps (Compact)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Convert Button -->
+                <button 
+                    id="submitBtn"
+                    onclick="startConversion()"
+                    class="w-full bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-semibold py-3.5 rounded-xl shadow-lg shadow-sky-500/25 active:scale-[0.99] transition flex items-center justify-center gap-2 text-base cursor-pointer"
+                >
+                    <i class="fa-solid fa-bolt"></i>
+                    <span>Convert & Download Audio</span>
+                </button>
+
+                <!-- Processing Box (Hidden by default) -->
+                <div id="progressContainer" class="hidden mt-6 p-4 rounded-xl bg-slate-900/90 border border-slate-800">
+                    <div class="flex items-center justify-between mb-2">
+                        <span id="statusText" class="text-xs font-medium text-slate-300 truncate max-w-[280px] sm:max-w-sm">Initializing...</span>
+                        <span id="pctText" class="text-xs font-bold text-sky-400">0%</span>
+                    </div>
+                    <!-- Bar -->
+                    <div class="w-full bg-slate-800 rounded-full h-2 overflow-hidden mb-3">
+                        <div id="progressBar" class="bg-gradient-to-r from-sky-500 to-indigo-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    
+                    <!-- Download Ready Trigger -->
+                    <div id="downloadReady" class="hidden text-center mt-4">
+                        <a 
+                            id="downloadLink" 
+                            href="#" 
+                            class="inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white font-bold px-6 py-3 rounded-xl shadow-lg shadow-emerald-500/30 transition text-sm active:scale-95"
+                            download
+                        >
+                            <i class="fa-solid fa-cloud-arrow-down text-lg"></i>
+                            <span id="downloadBtnText">Download Audio File</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Error Box -->
+                <div id="errorBox" class="hidden mt-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs text-center"></div>
+
+            </div>
+
+            <!-- Features Highlights -->
+            <div class="grid grid-cols-3 gap-3 mt-8 text-center text-slate-400 text-xs">
+                <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+                    <i class="fa-solid fa-bolt text-sky-400 text-base mb-1 block"></i>
+                    Fast Extraction
+                </div>
+                <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+                    <i class="fa-solid fa-compact-disc text-indigo-400 text-base mb-1 block"></i>
+                    Lossless Support
+                </div>
+                <div class="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+                    <i class="fa-solid fa-shield-halved text-emerald-400 text-base mb-1 block"></i>
+                    100% Free & Safe
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="w-full text-center py-6 text-slate-600 text-xs border-t border-slate-800/60">
+        AudioFlow &copy; 2026 &bull; For personal and fair-use backup only
+    </footer>
+
+    <!-- App Script -->
+    <script>
+        function updateQualityOptions() {
+            const format = document.getElementById('formatSelect').value;
+            const qualitySelect = document.getElementById('qualitySelect');
+
+            if (['flac', 'wav'].includes(format)) {
+                qualitySelect.innerHTML = '<option value="0" selected>Lossless (Best Original Fidelity)</option>';
+                qualitySelect.disabled = true;
+            } else if (format === 'mp3') {
+                qualitySelect.innerHTML = `
+                    <option value="320" selected>320 kbps (Maximum)</option>
+                    <option value="256">256 kbps (High)</option>
+                    <option value="192">192 kbps (Standard)</option>
+                    <option value="128">128 kbps (Compact)</option>
+                `;
+                qualitySelect.disabled = false;
+            } else if (format === 'aac') {
+                qualitySelect.innerHTML = `
+                    <option value="320" selected>320 kbps (High)</option>
+                    <option value="256">256 kbps</option>
+                    <option value="192">192 kbps</option>
+                `;
+                qualitySelect.disabled = false;
+            } else if (format === 'opus') {
+                qualitySelect.innerHTML = `
+                    <option value="160" selected>160 kbps (Transparent)</option>
+                    <option value="128">128 kbps</option>
+                    <option value="96">96 kbps</option>
+                `;
+                qualitySelect.disabled = false;
+            }
+        }
+
+        async function handlePaste() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) {
+                    document.getElementById('urlInput').value = text.trim();
+                }
+            } catch (err) {
+                // Clipboard permissions might be denied in some browsers
+                document.getElementById('urlInput').focus();
+            }
+        }
+
+        let pollInterval = null;
+
+        async function startConversion() {
+            const urlInput = document.getElementById('urlInput');
+            const url = urlInput.value.trim();
+            const format = document.getElementById('formatSelect').value;
+            const quality = document.getElementById('qualitySelect').value;
+
+            const errorBox = document.getElementById('errorBox');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const statusText = document.getElementById('statusText');
+            const pctText = document.getElementById('pctText');
+            const downloadReady = document.getElementById('downloadReady');
+            const submitBtn = document.getElementById('submitBtn');
+
+            errorBox.classList.add('hidden');
+            downloadReady.classList.add('hidden');
+
+            if (!url) {
+                errorBox.textContent = "Please enter a YouTube or Instagram link.";
+                errorBox.classList.remove('hidden');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            progressContainer.classList.remove('hidden');
+            progressBar.style.width = '5%';
+            pctText.textContent = '5%';
+            statusText.textContent = 'Submitting request...';
+
+            try {
+                const res = await fetch('/api/convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, format, quality })
+                });
+
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.detail || 'Failed to initialize conversion.');
+                }
+
+                const jobId = data.job_id;
+                pollJob(jobId);
+
+            } catch (err) {
+                errorBox.textContent = err.message;
+                errorBox.classList.remove('hidden');
+                submitBtn.disabled = false;
+                submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                progressContainer.classList.add('hidden');
+            }
+        }
+
+        function pollJob(jobId) {
+            if (pollInterval) clearInterval(pollInterval);
+
+            pollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/status/${jobId}`);
+                    if (!res.ok) return;
+
+                    const job = await res.json();
+                    const progressBar = document.getElementById('progressBar');
+                    const statusText = document.getElementById('statusText');
+                    const pctText = document.getElementById('pctText');
+                    const downloadReady = document.getElementById('downloadReady');
+                    const downloadLink = document.getElementById('downloadLink');
+                    const downloadBtnText = document.getElementById('downloadBtnText');
+                    const submitBtn = document.getElementById('submitBtn');
+                    const errorBox = document.getElementById('errorBox');
+
+                    progressBar.style.width = `${job.progress}%`;
+                    pctText.textContent = `${job.progress}%`;
+                    statusText.textContent = job.message || 'Processing...';
+
+                    if (job.status === 'completed') {
+                        clearInterval(pollInterval);
+                        submitBtn.disabled = false;
+                        submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+
+                        downloadLink.href = `/api/download/${jobId}`;
+                        downloadBtnText.textContent = `Download: ${job.file_name}`;
+                        downloadReady.classList.remove('hidden');
+                    } else if (job.status === 'error') {
+                        clearInterval(pollInterval);
+                        submitBtn.disabled = false;
+                        submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        errorBox.textContent = job.message || 'Conversion error occurred.';
+                        errorBox.classList.remove('hidden');
+                    }
+                } catch (err) {
+                    console.error("Polling error:", err);
+                }
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    return HTMLResponse(content=HTML_CONTENT)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Bind to 0.0.0.0 so devices on your local network (like your phone) can connect
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
